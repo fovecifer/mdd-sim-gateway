@@ -4,6 +4,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Opening Notifications with Telegram SMS control enabled no longer blanks the page. The SIM
+  selector now reads the real API's `instances` envelope instead of treating the response as
+  an array. Invalid responses show a load error instead of crashing React; frontend regression
+  tests exercise the real response shape and run in CI.
+
 ### Added
 
 - Self-use fork: an opt-in Telegram SMS assistant for one explicitly authorized private-chat

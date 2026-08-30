@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
+import { telegramSmsLines } from '../telegramSmsLines.js'
 
 const STATES = {
   disabled: 'Disabled', connected: 'Connected', invalid_token: 'Invalid bot token',
@@ -19,8 +20,8 @@ export default function TelegramSmsSettings({ config, onChange }) {
   const change = patch => onChange({ sms_control: { ...c, ...patch } })
   useEffect(() => {
     let alive = true
-    api.instances().then(x => { if (alive) setLines(x) }).catch(() => {
-      if (alive) setLoadError('Could not load SIM lines')
+    api.instances().then(telegramSmsLines).then(x => { if (alive) setLines(x) }).catch(() => {
+      if (alive) { setLines([]); setLoadError('Could not load SIM lines') }
     })
     const refresh = () => api.telegramStatus().then(x => {
       if (alive) setHealth(x)
@@ -44,7 +45,7 @@ export default function TelegramSmsSettings({ config, onChange }) {
       <select id="tg-sms-line" value={c.instance_id || ''}
         onChange={e => change({ instance_id: e.target.value, bind_current_sim: true })}>
         <option value="">{t('Select a SIM line')}</option>
-        {lines.filter(x => x.iccid).map(x => <option key={x.id} value={String(x.id)}>
+        {lines.map(x => <option key={x.id} value={x.id}>
           {x.name || `SIM ${x.id}`} · {t('Line')} {x.id}
         </option>)}
       </select>
