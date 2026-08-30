@@ -123,6 +123,8 @@ DEFAULTS = {
             "proxy_mode": "direct",
             "proxy_url": "",
             "proxy_country": "",
+            "sms_control": {"enabled": False, "owner_id": "", "instance_id": "",
+                            "daily_limit": 20, "identity": "", "grant": "", "since": 0},
             "events": {"incoming_sms": True, "incoming_call": True,
                        "missed_call": True, "voicemail_received": True,
                        "keepalive_result": True, "balance_low": True,
@@ -289,9 +291,12 @@ def load() -> dict:
             # preserve its hidden checkbox forever when loading a pre-keepalive config.
             merged["events"].pop("activation_reminder", None)
             out["settings"][key] = merged
-        # Telegram is notification-only. Drop command settings left by an older configuration
-        # so an upgrade cannot preserve a remote call/SMS control channel.
+        # Never revive the legacy unrestricted command channel. The fork's separately
+        # authorized, default-off sms_control has no call/shell capabilities.
         out["settings"]["telegram"].pop("commands", None)
+        out["settings"]["telegram"]["sms_control"] = {
+            **DEFAULTS["settings"]["telegram"]["sms_control"],
+            **(out["settings"]["telegram"].get("sms_control") or {})}
         # One private deployment previously appeared as a product-level "Universal Push"
         # preset. Present it as the ordinary custom webhook it really is, preserving its URL,
         # source field and token header. Saving Settings persists the standard representation.

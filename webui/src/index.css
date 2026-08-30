@@ -104,6 +104,10 @@ body {
 .st-STOPPED { background: #94a3b8; }
 
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; }
+.u-tg-sms { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.u-tg-sms h3 { font-size: 14px; font-weight: 650; margin-bottom: 8px; }
+.u-tg-sms p { margin: 6px 0 12px; color: var(--text-dim); font-size: 12px; line-height: 1.65; }
+.u-tg-sms label { display: flex; align-items: center; gap: 8px; }
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border-radius: 10px; padding: 8px 14px; font-weight: 600; font-size: 14px; line-height: 1.2; text-decoration: none; cursor: pointer; border: 1px solid transparent; transition: .15s; }
 .btn-primary { background: var(--primary); color: #fff; }
 .btn-primary:hover { background: var(--primary-hover); }

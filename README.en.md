@@ -4,6 +4,11 @@
 
 <p align="center"><strong>Turn physical SIMs and eSIMs into a self-hosted gateway for VoWiFi, calls, SMS and isolated network egress.</strong></p>
 
+> **Self-use fork / development preview:** Based on upstream v1.5.2, this fork adds opt-in
+> two-way Telegram SMS for one owner, one bound SIM and individually confirmed VoWiFi sends.
+> This is not an upstream feature. Read [deployment and safety notes](docs/TELEGRAM_SMS.md)
+> before deploying; the upstream online installation commands below do not install this fork.
+
 <p align="center">
   <a href="README.md">中文</a> ·
   <a href="#quick-install">Quick install</a> ·
@@ -79,7 +84,8 @@ When installation completes, open `https://<gateway-address>:8443` and create th
 - Check releases every six hours in the background. Choose automatic installation or notify-only,
   scoped to main releases or every release. Unattended installation still requires the exact version
   and earliest rollout time to be approved separately in `update-policy.json`.
-- Telegram is notification-only and does not accept remote control commands.
+- Telegram is notification-only by default. This fork can separately enable confirmed,
+  single-owner SMS commands; it never provides remote calls or shell commands.
 - Manage eUICC profiles through a pinned local lpac build, including dual-SE readers.
 - Offer HTTPS, first-run administrator setup, persistent 12-hour or 30-day sessions, CSRF protection,
   login throttling, local backups, audit records, redacted support bundles and release checks.
@@ -119,7 +125,7 @@ See [installation](docs/INSTALL.md), [architecture](docs/ARCHITECTURE.md),
 
 ## Responsible use
 
-> **Compliance warning:** This software is only for use by the verified subscriber of a number where the carrier expressly permits that use. Do not use it for fraud, bulk or nuisance calling, marketing, verification-code collection, renting numbers or lines, call forwarding for others, concealing the controller's location, or providing telecommunications services to third parties. Users must follow local law, subscriber identity rules, and carrier terms. This project grants no telecom licence or carrier authorisation. MDD Sim Gateway stores and runs at most **five SIM lines** and provides neither standalone SIP accounts nor Telegram commands for calls, SMS, or hangup. Technical restrictions do not make any particular use lawful.
+> **Compliance warning:** This software is only for use by the verified subscriber of a number where the carrier expressly permits that use. Do not use it for fraud, bulk or nuisance calling, marketing, verification-code collection, renting numbers or lines, call forwarding for others, concealing the controller's location, or providing telecommunications services to third parties. Users must follow local law, subscriber identity rules, and carrier terms. This project grants no telecom licence or carrier authorisation. MDD Sim Gateway stores and runs at most **five SIM lines** and provides neither standalone SIP accounts nor Telegram commands for calls or hangup. This fork's SMS extension is restricted to its authorized owner, one SIM and individually confirmed sends. Technical restrictions do not make any particular use lawful.
 
 ## Community and feedback
 

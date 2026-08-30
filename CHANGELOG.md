@@ -2,6 +2,26 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Self-use fork: an opt-in Telegram SMS assistant for one explicitly authorized private-chat
+  user and one SIM. Reply to a notification or use `/sms +international-number text`, then
+  confirm the recipient and body within 120 seconds. VoWiFi only; no remote calls or shell.
+- Incoming SMS and its Telegram outbox are saved together. Reply targets, processed updates
+  and confirmation claims survive restarts. Interrupted sends remain unknown and are never
+  automatically resubmitted. A rolling 24-hour submission limit and minimum spacing apply.
+- Notification settings include SIM binding, owner ID, limits and polling status. Existing
+  installations remain notification-only until an administrator explicitly enables SMS control.
+
+### Security
+
+- SIM changes require explicit rebinding. Permission changes invalidate older drafts and
+  queued notifications. Web authentication/CSRF and legacy remote-command removal are preserved.
+- Bot chats are not end-to-end encrypted; the added local notification/draft content is retained
+  for up to 30 days. This preview requires controlled deployment and manual upstream integration.
+
 ## [1.5.2] - 2026-08-26
 
 ### Fixed

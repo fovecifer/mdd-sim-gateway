@@ -31,7 +31,8 @@ from fastapi.staticfiles import StaticFiles
 from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
-               sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd)
+               sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd,
+               telegram_sms)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -2250,6 +2251,7 @@ async def lifespan(app: FastAPI):
     host_poller = asyncio.create_task(host_health_poller())
     segment_reaper = asyncio.create_task(sms_segment_reaper())
     update_poller = asyncio.create_task(update_automation_poller())
+    telegram_worker = asyncio.create_task(telegram_controller.run())
     for iid in recovered_modem_lines:
         asyncio.create_task(_auto_start_hotplugged_line(iid))
     yield
@@ -2259,10 +2261,11 @@ async def lifespan(app: FastAPI):
     host_poller.cancel()
     segment_reaper.cancel()
     update_poller.cancel()
+    telegram_worker.cancel()
     # Reap the cancelled tasks (the monitor may be parked in a to_thread wait for up to
     # its timeout; awaiting keeps shutdown deterministic instead of leaking the error).
     await asyncio.gather(poller, monitor, sms_poller, host_poller,
-                         segment_reaper, update_poller, return_exceptions=True)
+                         segment_reaper, update_poller, telegram_worker, return_exceptions=True)
     await hub.runtime.close()
     for c in hub.ami.values():
         await c.close()
@@ -3939,9 +3942,13 @@ def api_put_settings(body: dict):
             notify_push.build_webhook_request(webhook, sample)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             raise HTTPException(400, f"invalid webhook configuration: {exc}")
-    # Telegram is notification-only. Ignore stale clients that
-    # still submit a remote command configuration.
-    (body.get("telegram") or {}).pop("commands", None)
+    if "telegram" in body:
+        try:
+            body["telegram"] = telegram_sms.validate_settings(
+                body["telegram"], cfg.get_settings().get("telegram") or {},
+                [line for line in cfg.list_instances() if cfg.line_allowed(str(line["id"]))])
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     pushplus = body.get("pushplus") or {}
     if pushplus.get("enabled"):
         if not str(pushplus.get("token") or "").strip():
@@ -4079,6 +4086,11 @@ async def api_pushplus_test(body: dict):
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
+
+
+@app.get("/api/notifications/telegram/status")
+def api_telegram_status():
+    return telegram_controller.status()
 
 
 @app.get("/api/notifications/deliveries")
@@ -4764,13 +4776,18 @@ async def _watch_sms_delivery(iid: str, mid: int, since: int, timeout: float = 4
 
 
 async def _send_sms_vowifi(iid: str, to: str, text: str,
-                           ami: AmiClient | None = None) -> dict:
+                           ami: AmiClient | None = None, authorize=None) -> dict:
     """Submit one MO SMS through Asterisk/IMS and start its delivery watcher."""
     ami = ami or await hub.ami_for(iid)
     if not ami:
         return {"ok": False, "unavailable": True, "message": None,
                 "error": "VoWiFi is not running / its control channel is unavailable.",
                 "transport": "vowifi"}
+    # Telegram authority can be revoked while waiting for the line lock/AMI connection.
+    # Re-check immediately before the actual submission, not only at button receipt.
+    if authorize is not None and not authorize():
+        return {"ok": False, "unavailable": True, "message": None,
+                "error": "SMS authorization is no longer valid."}
     since = int(time.time())
     rec = store.add_message(iid, "out", to, text, status="pending", transport="vowifi")
     res = await ami.send_sms(to, text)
@@ -4837,7 +4854,7 @@ async def _send_sms_cellular(iid: str, to: str, text: str) -> dict:
 
 
 async def send_sms_on_line(iid: str, to: str, text: str,
-                           transport: str = "auto") -> dict:
+                           transport: str = "auto", authorize=None) -> dict:
     """Send one MO SMS using ``auto``, ``vowifi`` or ``cellular``.
 
     ``auto`` prefers a *confirmed registered* VoWiFi route. It selects cellular only before any
@@ -4851,7 +4868,12 @@ async def send_sms_on_line(iid: str, to: str, text: str,
 
     lock = hub.sms_send_locks.setdefault(iid, asyncio.Lock())
     async with lock:
+        if authorize is not None and (transport != "vowifi" or not authorize()):
+            return {"ok": False, "unavailable": True, "message": None,
+                    "error": "SMS authorization is no longer valid."}
         if transport == "vowifi":
+            if authorize is not None:
+                return await _send_sms_vowifi(iid, to, text, authorize=authorize)
             return await _send_sms_vowifi(iid, to, text)
         if transport == "cellular":
             return await _send_sms_cellular(iid, to, text)
@@ -4866,6 +4888,29 @@ async def send_sms_on_line(iid: str, to: str, text: str,
                 result["error"] = f"VoWiFi is not registered. {cellular_error}"
         result["requested_transport"] = "auto"
         return result
+
+
+async def _telegram_send_sms(config: dict, draft: dict) -> dict:
+    """The first self-use release is deliberately VoWiFi-only; no cellular fallback."""
+    iid = str(draft["instance"])
+
+    def authorize():
+        live = cfg.get_settings().get("telegram") or {}
+        line = cfg.get_instance(iid)
+        return (telegram_sms.enabled(live) and telegram_sms.scope(live) == telegram_sms.scope(config)
+                and time.time() < draft["expires"]
+                and line is not None and line.get("enabled") is True and cfg.line_allowed(iid)
+                and telegram_sms.identity(line) == draft["identity"]
+                and any(c.get("present") and c.get("iccid") == line.get("iccid")
+                        for c in hub.cards.values())
+                and not _card_identity_mismatch(line) and not _local_card_fault(iid, line))
+
+    if not authorize() or not await _registered_vowifi_ami(iid):
+        return {"ok": False, "unavailable": True, "message": None}
+    return await send_sms_on_line(iid, draft["peer"], draft["body"], "vowifi", authorize=authorize)
+
+
+telegram_controller = telegram_sms.Controller(_telegram_send_sms)
 
 
 @app.post("/api/instances/{iid}/sms/send")

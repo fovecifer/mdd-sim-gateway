@@ -532,7 +532,12 @@ def dispatch(settings: dict, event: str, instance: dict, source: str, text: str 
         if wh.get("enabled") and _events_enabled(wh).get(event):
             _deliver_with_retry("webhook", send_webhook, wh, payload)
         tg = settings.get("telegram") or {}
-        if tg.get("enabled") and _events_enabled(tg).get(event):
+        # In two-way mode the bound line's incoming SMS is already in the durable outbox,
+        # inserted atomically with its SMS history record. Do not send a second copy here.
+        from . import telegram_sms
+        durable_sms = event == EV_INCOMING_SMS and telegram_sms.handles_incoming(
+            tg, str(instance.get("id")))
+        if tg.get("enabled") and _events_enabled(tg).get(event) and not durable_sms:
             _deliver_with_retry("telegram", send_telegram, tg, payload)
         pp = settings.get("pushplus") or {}
         if pp.get("enabled") and _events_enabled(pp).get(event):

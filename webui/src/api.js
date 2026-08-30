@@ -86,6 +86,7 @@ export const api = {
   refreshEgress: () => j('POST', '/api/egress/refresh', {}),
   testWebhook: (config) => j('POST', '/api/notifications/webhook/test', config || {}),
   testTelegram: (config) => j('POST', '/api/notifications/telegram/test', config || {}),
+  telegramStatus: () => j('GET', '/api/notifications/telegram/status'),
   testPushPlus: (config) => j('POST', '/api/notifications/pushplus/test', config || {}),
   notificationDeliveries: (limit = 100) => j('GET', `/api/notifications/deliveries?limit=${limit}`),
   clearNotificationDeliveries: () => j('DELETE', '/api/notifications/deliveries'),

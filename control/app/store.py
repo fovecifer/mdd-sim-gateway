@@ -43,6 +43,7 @@ def _conn():
 
 
 def init():
+    from . import telegram_sms
     with _lock:
         # Preserve call/SMS history when upgrading an installation that used the former
         # database filename. Copy once and keep the source as a rollback artifact.
@@ -228,6 +229,7 @@ def init():
                 CREATE INDEX IF NOT EXISTS idx_voicemails_inst ON voicemails(instance, ts);
                 """
             )
+            telegram_sms.init_schema(c)
             # migration: per-message failure detail (added later)
             try:
                 c.execute("ALTER TABLE messages ADD COLUMN error TEXT")
@@ -494,6 +496,7 @@ def take_stale_sms_segments(timeout: int = SEGMENT_TIMEOUT,
 
 def add_message(instance: str, direction: str, peer: str, body: str, status: str = "ok",
                 transport: str = "vowifi", ts: int | None = None) -> dict:
+    from . import telegram_sms
     ts = int(ts or time.time())
     with _lock, _conn() as c:
         cur = c.execute(
@@ -501,6 +504,9 @@ def add_message(instance: str, direction: str, peer: str, body: str, status: str
             (str(instance), direction, peer, body, status, ts, transport),
         )
         mid = cur.lastrowid
+        telegram_sms.capture_incoming(c, {
+            "id": mid, "instance": str(instance), "direction": direction,
+            "peer": peer, "body": body, "ts": ts})
     return {"id": mid, "instance": str(instance), "direction": direction,
             "peer": peer, "body": body, "status": status, "error": None, "ts": ts,
             "transport": transport}
@@ -510,6 +516,7 @@ def add_imported_message(fingerprint: str, instance: str, direction: str, peer: 
                          body: str, ts: int, transport: str = "cellular") -> dict | None:
     """Atomically import one external message once. The marker survives UI deletion so an
     old SMS still retained by the modem is not resurrected on every polling cycle."""
+    from . import telegram_sms
     with _lock, _conn() as c:
         marker = c.execute(
             "INSERT OR IGNORE INTO message_imports(fingerprint,instance,imported_ts) VALUES(?,?,?)",
@@ -523,6 +530,9 @@ def add_imported_message(fingerprint: str, instance: str, direction: str, peer: 
             (str(instance), direction, peer, body, "ok", int(ts), transport),
         )
         mid = cur.lastrowid
+        telegram_sms.capture_incoming(c, {
+            "id": mid, "instance": str(instance), "direction": direction,
+            "peer": peer, "body": body, "ts": int(ts)})
     return {"id": mid, "instance": str(instance), "direction": direction,
             "peer": peer, "body": body, "status": "ok", "error": None,
             "ts": int(ts), "transport": transport}
