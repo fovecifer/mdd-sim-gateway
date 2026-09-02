@@ -371,8 +371,10 @@ def outbound_supports_udp(outbound: dict) -> bool:
         return False
     if kind == "socks":
         return str(outbound.get("version") or "5") == "5"
+    # AnyTLS (sing-box >= 1.12) carries UDP through UoT. Admit native outbound
+    # objects without an extra SOCKS bridge; runtime validation/probes still apply.
     return kind in {"shadowsocks", "trojan", "vless", "vmess", "hysteria", "hysteria2",
-                    "tuic", "wireguard"}
+                    "tuic", "wireguard", "anytls"}
 
 
 def clash_outbound(node: dict, tag: str) -> dict:

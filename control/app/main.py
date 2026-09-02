@@ -4898,6 +4898,7 @@ async def _telegram_send_sms(config: dict, draft: dict) -> dict:
         live = cfg.get_settings().get("telegram") or {}
         line = cfg.get_instance(iid)
         return (telegram_sms.enabled(live) and telegram_sms.scope(live) == telegram_sms.scope(config)
+                and telegram_sms.bindings(live).get(iid) == draft["identity"]
                 and time.time() < draft["expires"]
                 and line is not None and line.get("enabled") is True and cfg.line_allowed(iid)
                 and telegram_sms.identity(line) == draft["identity"]

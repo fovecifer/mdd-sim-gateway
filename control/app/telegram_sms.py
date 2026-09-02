@@ -25,6 +25,13 @@ TTL = 120
 RETENTION = 30 * 86400
 MAX_TEXT_UNITS = 160  # Conservative cap; Unicode may still incur multiple SMS segments.
 PHONE = re.compile(r"\+[1-9][0-9]{6,14}\Z")
+# A carrier/service short code is safe to target only when it came from the
+# server-side reply mapping for a real inbound notification. Keeping this out
+# of PHONE means /sms can never manufacture a premium/service-code target.
+# Three through eight digits covers common carrier and service short numbers.
+# The authenticated inbound mapping plus confirmation is the security boundary.
+SHORTCODE = re.compile(r"[0-9]{3,8}\Z")
+LINE_ID = re.compile(r"[1-9][0-9]{0,9}\Z")
 
 
 def identity(line: dict | None) -> str:
@@ -35,8 +42,33 @@ def identity(line: dict | None) -> str:
     return hashlib.sha256(f"{line.get('id')}:{iccid}".encode()).hexdigest()
 
 
+def bindings(config: dict) -> dict[str, str]:
+    """Read multi-SIM grants, or the unchanged legacy single-SIM grant.
+
+    An explicitly empty/malformed multi-SIM selection must never revive legacy fields.
+    Identity/grant values are created by validate_settings, not accepted from clients.
+    """
+    c = config.get("sms_control") or {}
+    if "instance_ids" in c:
+        ids, identities = c.get("instance_ids"), c.get("identities")
+        if not isinstance(ids, list) or not isinstance(identities, dict) or len(ids) > cfg.MAX_SIM_LINES:
+            return {}
+        if any(not isinstance(iid, str) or not LINE_ID.fullmatch(iid) for iid in ids):
+            return {}
+        return {iid: identities[iid] for iid in ids
+                if isinstance(identities.get(iid), str) and identities[iid]}
+    iid, bound = str(c.get("instance_id") or ""), c.get("identity")
+    return {iid: bound} if LINE_ID.fullmatch(iid) and isinstance(bound, str) and bound else {}
+
+
 def scope(config: dict) -> str:
     control = config.get("sms_control") or {}
+    if "instance_ids" in control:
+        return hashlib.sha256(json.dumps([
+            "multi-sim-v1", config.get("bot_token"), config.get("chat_id"),
+            control.get("owner_id"), sorted(bindings(config).items()), control.get("grant"),
+        ]).encode()).hexdigest()
+    # Preserve existing offsets/replies/drafts until the administrator saves multi-SIM settings.
     return hashlib.sha256(json.dumps([
         config.get("bot_token"), config.get("chat_id"), control.get("owner_id"),
         control.get("instance_id"), control.get("identity"), control.get("grant"),
@@ -46,7 +78,7 @@ def scope(config: dict) -> str:
 def enabled(config: dict) -> bool:
     c = config.get("sms_control") or {}
     return (config.get("enabled") is True and c.get("enabled") is True
-            and bool(c.get("grant")) and bool(c.get("identity"))
+            and bool(c.get("grant")) and bool(bindings(config))
             and str(c.get("owner_id", "")).isdigit()
             and str(c.get("owner_id")) == str(config.get("chat_id")))
 
@@ -63,10 +95,29 @@ def validate_settings(value: dict, previous: dict, lines: list[dict]) -> dict:
     if not isinstance(patch, dict):
         raise ValueError("Telegram SMS settings must be an object")
     c = {**old, **{k: v for k, v in patch.items()
-                   if k in {"enabled", "owner_id", "instance_id", "daily_limit"}}}
+                   if k in {"enabled", "owner_id", "daily_limit"}}}
     if type(c["enabled"]) is not bool or type(result.get("enabled", False)) is not bool:
         raise ValueError("Telegram switches must be boolean")
-    c["owner_id"], c["instance_id"] = str(c["owner_id"]).strip(), str(c["instance_id"]).strip()
+    c["owner_id"] = str(c["owner_id"]).strip()
+    old_bindings = bindings(previous)
+    multi = "instance_ids" in patch or ("instance_ids" in old and "instance_id" not in patch)
+    if multi:
+        requested = patch.get("instance_ids", old.get("instance_ids", []))
+        if (not isinstance(requested, list) or len(requested) > cfg.MAX_SIM_LINES
+                or any(not isinstance(iid, str) or not LINE_ID.fullmatch(iid) for iid in requested)
+                or len(set(requested)) != len(requested)):
+            raise ValueError("Select up to five distinct SIM line IDs")
+        ids = sorted(requested, key=int)
+        c["instance_ids"] = ids
+        c["identities"] = {iid: old_bindings.get(iid, "") for iid in ids}
+        c.pop("instance_id", None)
+        c.pop("identity", None)
+    else:
+        c["instance_id"] = str(patch.get("instance_id", old.get("instance_id", ""))).strip()
+        ids = [c["instance_id"]] if c["instance_id"] else []
+        c["identity"] = old_bindings.get(c["instance_id"], "")
+        c.pop("instance_ids", None)
+        c.pop("identities", None)
     if type(c["daily_limit"]) is not int or not 1 <= c["daily_limit"] <= 100:
         raise ValueError("Telegram SMS daily limit must be between 1 and 100")
     # An emergency channel-off save must work even if the SIM/token is now invalid.
@@ -77,17 +128,25 @@ def validate_settings(value: dict, previous: dict, lines: list[dict]) -> dict:
             raise ValueError("Two-way SMS requires your private chat ID to equal your user ID")
         if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]{20,}", str(result.get("bot_token") or "")):
             raise ValueError("A valid Telegram bot token is required")
-        line = next((x for x in lines if str(x["id"]) == c["instance_id"]), None)
-        current = identity(line)
-        if not current:
+        if not ids:
             raise ValueError("Select a SIM line with a known ICCID")
-        if (old["enabled"] and old["instance_id"] == c["instance_id"]
-                and old["identity"] and old["identity"] != current
-                and patch.get("bind_current_sim") is not True):
-            raise ValueError("The SIM changed. Explicitly bind the current SIM again")
-        c["identity"] = current
-    changed = any(c.get(k) != old.get(k) for k in
-                  ("enabled", "owner_id", "instance_id", "identity", "daily_limit"))
+        for iid in ids:
+            line = next((x for x in lines if str(x["id"]) == iid), None)
+            current = identity(line)
+            if not LINE_ID.fullmatch(iid) or not current or line.get("provisioning_state") == "draft":
+                raise ValueError("Select a configured SIM line with a known ICCID")
+            if (old["enabled"] and old_bindings.get(iid) and old_bindings[iid] != current
+                    and patch.get("bind_current_sim") is not True):
+                raise ValueError("The SIM changed. Explicitly bind the current SIM again")
+            if multi:
+                c["identities"][iid] = current
+            else:
+                c["identity"] = current
+    changed = any(c.get(k) != old.get(k) for k in ("enabled", "owner_id", "daily_limit"))
+    changed |= ("instance_ids" in c) != ("instance_ids" in old)
+    changed |= ids != (old.get("instance_ids") if "instance_ids" in old
+                       else ([old["instance_id"]] if old.get("instance_id") else []))
+    changed |= bindings({"sms_control": c}) != old_bindings
     changed |= any(result.get(k) != previous.get(k) for k in ("enabled", "bot_token", "chat_id"))
     changed |= patch.get("bind_current_sim") is True
     if changed or not old["grant"]:
@@ -142,7 +201,7 @@ def _queue(db, config, key, text, markup=None, peer="", instance="", binding="")
 
 
 def handles_incoming(config: dict, iid: str) -> bool:
-    return enabled(config) and str(config["sms_control"]["instance_id"]) == str(iid)
+    return enabled(config) and str(iid) in bindings(config)
 
 
 def capture_incoming(db, record: dict) -> None:
@@ -154,9 +213,10 @@ def capture_incoming(db, record: dict) -> None:
         return
     if (config.get("events") or {}).get("incoming_sms") is False:
         return
-    c = config["sms_control"]
+    iid = str(record["instance"])
+    bound = bindings(config)[iid]
     # A stale binding must not attribute a new SIM's messages to the old permission grant.
-    if identity(cfg.get_instance(c["instance_id"])) != c["identity"]:
+    if identity(cfg.get_instance(iid)) != bound:
         return
     text = (f"📩 MDD · 收到短信 S{record['id']}\n线路 {record['instance']}\n"
             f"来自 {record['peer']}\n\n{record['body']}")
@@ -164,7 +224,7 @@ def capture_incoming(db, record: dict) -> None:
     # 1500 Unicode code points is <=3000 UTF-16 units even for astral characters.
     for start in range(0, len(text), 1500):
         _queue(db, config, f"sms:{record['id']}:{start}", text[start:start + 1500],
-               peer=record["peer"], instance=record["instance"], binding=c["identity"])
+               peer=record["peer"], instance=iid, binding=bound)
 
 
 class TelegramError(Exception):
@@ -211,10 +271,20 @@ class Controller:
         now = self.get_config()
         return enabled(now) and scope(now) == scope(config)
 
-    def authorized_line(self, config):
-        c = config["sms_control"]
-        line = self.get_line(c["instance_id"])
-        return self.current(config) and identity(line) == c["identity"]
+    def authorized_line(self, config, iid=None, expected_identity=None):
+        granted = bindings(config)
+        if iid is None:
+            iid = next(iter(granted)) if len(granted) == 1 else ""
+        iid = str(iid)
+        bound = granted.get(iid)
+        return (self.current(config) and bool(bound)
+                and (expected_identity is None or bound == expected_identity)
+                and identity(self.get_line(iid)) == bound)
+
+    def line_label(self, iid):
+        line = self.get_line(str(iid)) or {}
+        name = " ".join(str(line.get("name") or "").split())[:48]
+        return f"线路 {iid}" + (f" · {name}" if name else "")
 
     def status(self):
         with _db() as db:
@@ -230,8 +300,8 @@ class Controller:
         now = int(time.time())
         active = scope(config) if enabled(config) else "disabled"
         with _db() as db:
-            db.execute("UPDATE tg_drafts SET state='expired' WHERE state='pending' AND expires<?", (now,))
-            db.execute("UPDATE tg_drafts SET state='cancelled' WHERE state='pending' AND scope!=?", (active,))
+            db.execute("UPDATE tg_drafts SET state='expired' WHERE state IN ('pending','choosing') AND expires<?", (now,))
+            db.execute("UPDATE tg_drafts SET state='cancelled' WHERE state IN ('pending','choosing') AND scope!=?", (active,))
             db.execute("UPDATE tg_outbox SET state='cancelled' WHERE state='pending' AND scope!=?", (active,))
             for table in ("tg_drafts", "tg_outbox", "tg_replies"):
                 db.execute(f"DELETE FROM {table} WHERE created<?", (now - RETENTION,))
@@ -267,11 +337,12 @@ class Controller:
         if not authorized:
             return
         key = f"update:{uid}"
-        if not self.authorized_line(config):
-            self.queue(config, key, "绑定的 SIM 已变更或授权已关闭，请在网页重新配置。未发送短信。")
-            return
         if isinstance(callback, dict):
-            await self.confirm(config, str(callback.get("data") or ""), key)
+            data = str(callback.get("data") or "")
+            if data.startswith("select:"):
+                await self.select_line(config, data, key)
+            else:
+                await self.confirm(config, data, key)
             try:
                 await asyncio.to_thread(api_call, config, "answerCallbackQuery", {"callback_query_id": callback["id"]})
             except (TelegramError, KeyError):
@@ -287,49 +358,111 @@ class Controller:
             return
         if text in ("/start", "/help"):
             self.queue(config, key, "MDD 短信助手（仅本人）\n"
-                       "回复收到的短信通知，或输入：\n/sms +国际号码 正文\n"
-                       "/status 查看绑定状态\n/recent 查看最近发送结果\n"
-                       "每次发送须点击确认，120 秒过期。仅支持普通国际号码，不支持短码、群发或通话。")
+                       "回复新的短信通知，自动使用收到该短信的线路。\n"
+                       "/sms +国际号码 正文 — 多卡时先选线路\n"
+                       "/sms 线路ID +国际号码 正文 — 指定线路\n"
+                       "/lines 或 /status 查看授权线路\n/recent 查看最近发送结果\n"
+                       "每次发送须点击确认，120 秒过期。主动发送仅支持普通国际号码；"
+                       "回复真实短信通知时支持 3–8 位纯数字短号。不支持字母发送者、群发或通话。")
             return
-        if text == "/status":
-            self.queue(config, key, f"已绑定线路 {c['instance_id']}；授权有效。\n"
-                       f"上限 {c['daily_limit']} 次提交/滚动24小时。此状态不代表 IMS 已注册。")
+        if text in ("/status", "/lines"):
+            summary = []
+            for iid in bindings(config):
+                line = self.get_line(iid) or {}
+                state = "已授权" if self.authorized_line(config, iid) else "SIM 身份已变更/线路已删除"
+                if line.get("enabled") is False:
+                    state += " · 已停用"
+                summary.append(f"{self.line_label(iid)} · {state}")
+            self.queue(config, key, "授权线路：\n" + "\n".join(summary) +
+                       f"\n所有线路共用上限 {c['daily_limit']} 次提交/滚动24小时。此状态不代表 IMS 已注册。")
             return
         if text == "/recent":
             with _db() as db:
-                rows = db.execute("""SELECT d.token,d.peer,d.state,m.status FROM tg_drafts d
+                rows = db.execute("""SELECT d.token,d.instance,d.peer,d.state,m.status FROM tg_drafts d
                     LEFT JOIN messages m ON m.id=d.message_id
                     WHERE d.scope=? ORDER BY d.created DESC,d.rowid DESC LIMIT 5""", (scope(config),)).fetchall()
             self.queue(config, key, "最近发送（submitted/sent 是已提交，不代表对方收到）：\n" +
-                       ("\n".join(f"{r['token'][:6]} · {r['peer']} · {r['state']} / {r['status'] or '—'}" for r in rows) or "暂无记录"))
+                       ("\n".join(f"{r['token'][:6]} · 线路 {r['instance'] or '待选择'} · {r['peer']} · {r['state']} / {r['status'] or '—'}" for r in rows) or "暂无记录"))
             return
-        peer = ""
+        peer, iid, reply_target = "", "", False
         if text.startswith("/sms "):
             parts = text.split(maxsplit=2)
             if len(parts) == 3:
-                _, peer, text = parts
+                if parts[1].startswith("+"):
+                    _, peer, text = parts
+                else:
+                    explicit = text.split(maxsplit=3)
+                    if len(explicit) == 4 and LINE_ID.fullmatch(explicit[1]):
+                        _, iid, peer, text = explicit
+                        if iid not in bindings(config):
+                            self.queue(config, key, "该线路未授权。请用 /lines 查看可选线路，或在网页配置。未发送短信。")
+                            return
         elif not text.startswith("/"):
             reply = message.get("reply_to_message") or {}
             with _db() as db:
                 row = db.execute("SELECT * FROM tg_replies WHERE scope=? AND chat=? AND message_id=?",
                                  (scope(config), c["owner_id"], reply.get("message_id"))).fetchone()
-            if row and row["identity"] == c["identity"] and row["instance"] == c["instance_id"]:
-                peer = row["peer"]
-        if not PHONE.fullmatch(peer):
-            self.queue(config, key, "请选择一条短信通知回复，或使用 /sms +国际号码 正文。短码及字母发送者不可回复。")
+            if row and bindings(config).get(row["instance"]) == row["identity"]:
+                peer, iid = row["peer"], row["instance"]
+                reply_target = True
+        if not PHONE.fullmatch(peer) and not (reply_target and SHORTCODE.fullmatch(peer)):
+            self.queue(config, key, "请选择一条新的短信通知回复，或使用 /sms +国际号码 正文（多卡时会选线），"
+                       "也可用 /sms 线路ID +国际号码 正文。回复真实通知时允许 3–8 位纯数字短号；"
+                       "主动短号及字母发送者不可回复。")
             return
         if not text.strip() or len(text.encode("utf-16-le")) // 2 > MAX_TEXT_UNITS or any(ord(x) < 32 and x not in "\n\t" for x in text):
             self.queue(config, key, "正文为空、包含控制字符或超过 160 个 UTF-16 单位，请缩短后重试。")
             return
         token = secrets.token_hex(12)
         now = int(time.time())
+        granted = bindings(config)
+        if not iid and len(granted) == 1:
+            iid = next(iter(granted))
+        if iid and not self.authorized_line(config, iid):
+            self.queue(config, key, "该线路的 SIM 已变更或授权已关闭，请在网页重新配置。未发送短信。")
+            return
+        bound = granted.get(iid, "")
+        state = "pending" if iid else "choosing"
         with _db() as db:
-            db.execute("INSERT INTO tg_drafts(token,scope,instance,identity,peer,body,state,created,expires) VALUES(?,?,?,?,?,?,'pending',?,?)",
-                       (token, scope(config), c["instance_id"], c["identity"], peer, text, now, now + TTL))
-            _queue(db, config, key, f"待确认 · 线路 {c['instance_id']}\n收件人：{peer}\n\n{text}\n\n"
-                   "可能按多条短信计费。120 秒内确认；提交不等于送达。",
-                   {"inline_keyboard": [[{"text": "确认发送", "callback_data": f"send:{token}"},
-                                          {"text": "取消", "callback_data": f"cancel:{token}"}]]})
+            db.execute("INSERT INTO tg_drafts(token,scope,instance,identity,peer,body,state,created,expires) VALUES(?,?,?,?,?,?,?,?,?)",
+                       (token, scope(config), iid, bound, peer, text, state, now, now + TTL))
+            if iid:
+                self.queue_confirmation(db, config, key, token, iid, peer, text, now + TTL)
+            else:
+                buttons = [[{"text": self.line_label(line), "callback_data": f"select:{token}:{line}"}]
+                           for line in granted]
+                buttons.append([{"text": "取消", "callback_data": f"cancel:{token}"}])
+                _queue(db, config, key, f"请选择发送线路（尚未发送）：\n收件人：{peer}\n\n{text}\n\n"
+                       "选线后仍须确认发送；整个操作120秒内有效。", {"inline_keyboard": buttons})
+
+    def queue_confirmation(self, db, config, key, token, iid, peer, text, expires):
+        remaining = max(0, min(TTL, expires - int(time.time())))
+        shortcode_warning = ("\n\n⚠️ 这是运营商/服务短码。回复可能改变账户、授权或订阅状态，"
+                             "请仔细核对正文。" if SHORTCODE.fullmatch(peer) else "")
+        _queue(db, config, key, f"待确认 · {self.line_label(iid)}\n收件人：{peer}\n\n{text}\n\n"
+               f"可能按多条短信计费。剩余 {remaining} 秒内确认；提交不等于送达。"
+               f"{shortcode_warning}",
+               {"inline_keyboard": [[{"text": "确认发送", "callback_data": f"send:{token}"},
+                                      {"text": "取消", "callback_data": f"cancel:{token}"}]]})
+
+    async def select_line(self, config, data, key):
+        match = re.fullmatch(r"select:([a-f0-9]{24}):([1-9][0-9]{0,9})", data)
+        if not match:
+            return
+        token, iid = match.groups()
+        bound = bindings(config).get(iid)
+        with _db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM tg_drafts WHERE token=? AND scope=?", (token, scope(config))).fetchone()
+            if not row or row["state"] != "choosing" or row["expires"] <= int(time.time()):
+                _queue(db, config, key, "此次选线已完成、已取消或已过期，请重新输入。未发送短信。")
+                return
+            if not bound or not self.authorized_line(config, iid, bound):
+                _queue(db, config, key, "该线路未授权或 SIM 身份已变更。未发送短信。")
+                return
+            db.execute("UPDATE tg_drafts SET instance=?,identity=?,state='pending' WHERE token=? AND state='choosing'",
+                       (iid, bound, token))
+            self.queue_confirmation(db, config, key, token, iid, row["peer"], row["body"], row["expires"])
 
     async def confirm(self, config, data, key):
         action, _, token = data.partition(":")
@@ -340,12 +473,19 @@ class Controller:
         with _db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM tg_drafts WHERE token=? AND scope=?", (token, scope(config))).fetchone()
-            if not row or row["state"] != "pending" or row["expires"] <= now:
+            if not row or row["state"] not in ("pending", "choosing") or row["expires"] <= now:
                 _queue(db, config, key, "此确认已使用、已取消或已过期。未再次发送。")
                 return
             if action == "cancel":
                 db.execute("UPDATE tg_drafts SET state='cancelled' WHERE token=?", (token,))
                 _queue(db, config, key, "已取消，未发送短信。")
+                return
+            if row["state"] != "pending":
+                _queue(db, config, key, "请先选择发送线路，再确认发送。未发送短信。")
+                return
+            if not self.authorized_line(config, row["instance"], row["identity"]):
+                db.execute("UPDATE tg_drafts SET state='rejected' WHERE token=?", (token,))
+                _queue(db, config, key, "该线路未授权或 SIM 身份已变更，未发送短信。")
                 return
             used = db.execute("SELECT count(*),max(attempted) FROM tg_drafts WHERE attempted>?", (now - 86400,)).fetchone()
             if used[0] >= c["daily_limit"] or (used[1] is not None and now - used[1] < 10):
@@ -356,7 +496,7 @@ class Controller:
             draft = dict(row)
         state, mid = "unknown", None
         try:
-            if self.authorized_line(config):
+            if self.authorized_line(config, draft["instance"], draft["identity"]):
                 result = await self.send_sms(config, draft)
                 mid = (result.get("message") or {}).get("id")
                 state = "submitted" if result.get("ok") else ("rejected" if result.get("unavailable") else "unknown")
@@ -371,7 +511,7 @@ class Controller:
         finally:
             with _db() as db:
                 db.execute("UPDATE tg_drafts SET state=?,message_id=? WHERE token=?", (state, mid, token))
-        self.queue(config, key, {"submitted": "已提交到网关，不代表对方已收到。可用 /recent 查看结果。",
+        self.queue(config, key, f"{self.line_label(draft['instance'])}：" + {"submitted": "已提交到网关，不代表对方已收到。可用 /recent 查看结果。",
                                  "rejected": "授权、SIM 或线路不可用，未提交短信。",
                                  "unknown": "发送结果不明，可能已经发出。不会自动重发，请先检查网页短信记录。"}[state])
 

@@ -116,8 +116,9 @@ cd webui && npm run build                     # 触及 WebUI 时
 
 **产品边界写在代码里，不要绕过。** 线路上限、禁止外部 SIP 账号、通知单向不可远程控制——
 这些由 `tests/test_product_boundaries.py` 强制，触碰前先读它。本自用 fork 经明确授权新增
-默认关闭的 `sms_control`，仅允许单用户私聊、单卡、逐条确认短信；旧 `commands` 仍须删除，
-不可恢复通话、外部 SIP 或系统控制。新增边界由 `tests/test_telegram_sms.py` 强制。
+默认关闭的 `sms_control`，仅允许单用户私聊、最多五张明确授权的 SIM、逐条确认短信；旧 `commands` 仍须删除，
+不可恢复通话、外部 SIP 或系统控制。新增边界由 `tests/test_telegram_sms.py` 和
+`tests/test_telegram_multi_sim.py` 强制；通知回复锁定收信卡，多卡主动发信必须显式选线。
 
 ## 7. 与仓库外部资料的边界
 

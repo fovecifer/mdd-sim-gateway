@@ -304,12 +304,44 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         await self.process(self.callback(token))
         self.sender.assert_awaited_once()
 
-    async def test_shortcode_notification_can_be_read_but_not_replied_to(self):
+    async def test_shortcode_notification_can_be_replied_to_after_confirmation(self):
         with patch.object(cfg, "get_settings", return_value={"telegram": self.config}), \
                 patch.object(cfg, "get_instance", return_value=self.line):
-            store.add_message("1", "in", "12345", "service notice")
+            store.add_message("1", "in", "6700", "service notice")
         await self.controller.deliver_one(self.config)
-        await self.process(self.message("reply", reply=501))
+        await self.process(self.message("INFO", reply=501))
+        draft = self.rows("tg_drafts")[0]
+        self.assertEqual((draft["peer"], draft["state"]), ("6700", "pending"))
+        self.assertIn("可能改变账户", self.rows("tg_outbox")[-1]["text"])
+        self.sender.assert_not_awaited()
+        await self.process(self.callback(draft["token"]))
+        self.sender.assert_awaited_once()
+
+    async def test_three_to_eight_digit_mapped_short_numbers_are_accepted(self):
+        with tg._db() as db:
+            scope = tg.scope(self.config)
+            binding = tg.identity(self.line)
+            for message_id, peer in ((601, "611"), (602, "12345678")):
+                db.execute("INSERT INTO tg_replies VALUES(?,?,?,?,?,?,?)",
+                           (scope, OWNER, message_id, peer, "1", binding, int(time.time())))
+        for message_id in (601, 602):
+            await self.process(self.message("INFO", reply=message_id))
+        drafts = self.rows("tg_drafts")
+        self.assertEqual([row["peer"] for row in drafts], ["611", "12345678"])
+        self.assertTrue(all(row["state"] == "pending" for row in drafts))
+        self.assertTrue(all("可能改变账户" in row["text"] for row in self.rows("tg_outbox")))
+        self.sender.assert_not_awaited()
+
+    async def test_shortcode_cannot_be_manufactured_and_unsafe_senders_stay_blocked(self):
+        await self.process(self.message("/sms 6700 ALLOW"))
+        with tg._db() as db:
+            scope = tg.scope(self.config)
+            binding = tg.identity(self.line)
+            for message_id, peer in ((603, "61"), (604, "ServiceName"), (605, "123456789")):
+                db.execute("INSERT INTO tg_replies VALUES(?,?,?,?,?,?,?)",
+                           (scope, OWNER, message_id, peer, "1", binding, int(time.time())))
+        for message_id in (603, 604, 605):
+            await self.process(self.message("reply", reply=message_id))
         self.assertEqual(self.rows("tg_drafts"), [])
         self.sender.assert_not_awaited()
 

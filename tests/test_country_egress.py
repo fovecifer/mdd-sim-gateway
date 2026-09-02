@@ -234,6 +234,59 @@ class PastedNodeTests(unittest.TestCase):
             self.assertIn(expected, str(caught.exception))
 
 
+class AnyTLSOutboundTests(unittest.TestCase):
+    """Native AnyTLS uses sing-box's UDP support, not an extra local proxy."""
+
+    def node(self):
+        return {"type": "anytls", "tag": "original", "server": "us.example.net",
+                "server_port": 443, "password": "test-only-password",
+                "tls": {"enabled": True, "server_name": "us.example.net", "insecure": False},
+                "idle_session_timeout": "30s", "min_idle_session": 2}
+
+    def test_native_dict_is_retagged_without_losing_tls_or_session_options(self):
+        node = self.node()
+        outbound = parse_manual_outbound(node, "exit-us")
+        self.assertEqual(outbound, {**node, "tag": "exit-us"})
+        self.assertEqual(node["tag"], "original")
+        self.assertFalse(outbound["tls"]["insecure"])
+
+    def test_native_json_is_supported(self):
+        node = self.node()
+        self.assertEqual(parse_manual_outbound(json.dumps(node), "exit-us"),
+                         {**node, "tag": "exit-us"})
+
+    def test_explicit_tcp_only_restriction_is_still_rejected(self):
+        with self.assertRaisesRegex(ValueError, "UDP"):
+            parse_manual_outbound({**self.node(), "network": "tcp"}, "exit-us")
+
+    def test_manual_profile_renders_direct_anytls_without_socks_bridge(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp), Path.cwd(), dry_run=True)
+            config, states = app.build_proxy_config({
+                "profiles": {"native-us": {"name": "US native AnyTLS", "type": "node",
+                                          "value": json.dumps(self.node())}},
+                "exits": {"us": {"enabled": True, "profile_id": "native-us"}},
+            })
+            self.assertTrue(states["us"]["ready"])
+            outbound = next(x for x in config["outbounds"] if x["tag"] == "exit-us")
+            self.assertEqual(outbound, {**self.node(), "tag": "exit-us"})
+            self.assertNotIn("detour", outbound)
+
+    def test_existing_outbound_can_be_used_without_bridge(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            existing = root / "existing.json"
+            existing.write_text(json.dumps({"outbounds": [self.node()]}))
+            app = Orchestrator(root / "data", Path.cwd(), dry_run=True)
+            config, states = app.build_proxy_config({
+                "existing_singbox_config": str(existing),
+                "exits": {"us": {"enabled": True, "mode": "existing",
+                                  "outbound_tag": "original"}},
+            })
+            self.assertTrue(states["us"]["ready"])
+            self.assertEqual(config["outbounds"][0], {**self.node(), "tag": "exit-us"})
+
+
 SUBSCRIPTION = {"proxies": [
     {"name": "US Alpha", "type": "trojan", "server": "a.test", "port": 443, "password": "x"},
     {"name": "US Bravo", "type": "trojan", "server": "b.test", "port": 443, "password": "x"},

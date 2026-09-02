@@ -108,6 +108,9 @@ body {
 .u-tg-sms h3 { font-size: 14px; font-weight: 650; margin-bottom: 8px; }
 .u-tg-sms p { margin: 6px 0 12px; color: var(--text-dim); font-size: 12px; line-height: 1.65; }
 .u-tg-sms label { display: flex; align-items: center; gap: 8px; }
+.u-tg-sms-lines { margin: 12px 0; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.u-tg-sms-lines legend { padding: 0 4px; font-size: 12px; font-weight: 650; }
+.u-tg-sms-lines label { margin: 8px 0; }
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border-radius: 10px; padding: 8px 14px; font-weight: 600; font-size: 14px; line-height: 1.2; text-decoration: none; cursor: pointer; border: 1px solid transparent; transition: .15s; }
 .btn-primary { background: var(--primary); color: #fff; }
 .btn-primary:hover { background: var(--primary-hover); }
